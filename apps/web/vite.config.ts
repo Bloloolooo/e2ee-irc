@@ -8,6 +8,12 @@ export default defineConfig({
       "/ws": {
         target: "ws://localhost:3001",
         ws: true
+      },
+      "/files": {
+        target: "http://localhost:3001"
+      },
+      "/admin": {
+        target: "http://localhost:3001"
       }
     }
   }

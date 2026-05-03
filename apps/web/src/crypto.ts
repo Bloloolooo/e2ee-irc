@@ -48,6 +48,48 @@ export async function encryptMessage(
   };
 }
 
+export async function encryptBytes(
+  key: CryptoKey,
+  plaintext: Uint8Array
+): Promise<{ iv: string; ciphertext: Uint8Array }> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: toArrayBuffer(iv) },
+    key,
+    toArrayBuffer(plaintext)
+  );
+
+  return {
+    iv: bytesToBase64(iv),
+    ciphertext: new Uint8Array(encrypted)
+  };
+}
+
+export async function decryptBytes(
+  key: CryptoKey,
+  ivBase64: string,
+  ciphertext: Uint8Array
+): Promise<Uint8Array> {
+  const iv = base64ToBytes(ivBase64);
+  const decrypted = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: toArrayBuffer(iv) },
+    key,
+    toArrayBuffer(ciphertext)
+  );
+
+  return new Uint8Array(decrypted);
+}
+
+export async function importAesGcmKey(rawKey: Uint8Array): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    "raw",
+    toArrayBuffer(rawKey),
+    "AES-GCM",
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
 export async function decryptMessage<T>(
   key: CryptoKey,
   ivBase64: string,
@@ -64,7 +106,7 @@ export async function decryptMessage<T>(
   return JSON.parse(decoder.decode(decrypted)) as T;
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
+export function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) {
     binary += String.fromCharCode(byte);
@@ -72,7 +114,7 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function base64ToBytes(base64: string): Uint8Array {
+export function base64ToBytes(base64: string): Uint8Array {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) {
@@ -81,7 +123,7 @@ function base64ToBytes(base64: string): Uint8Array {
   return bytes;
 }
 
-function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(
     bytes.byteOffset,
     bytes.byteOffset + bytes.byteLength

@@ -203,14 +203,16 @@ input:focus {
   padding: 10px 12px;
 }
 
-.chat-message {
+.chat-message,
+.file-message {
   align-self: flex-start;
   background: #ffffff;
   border: 1px solid #d9e1e8;
   width: min(860px, 100%);
 }
 
-.chat-message.own {
+.chat-message.own,
+.file-message.own {
   border-color: #94c7d9;
   background: #e8f5f8;
 }
@@ -255,13 +257,35 @@ input:focus {
   color: #b42318;
 }
 
+.file-attachment {
+  align-items: center;
+  display: flex;
+  gap: 14px;
+  justify-content: space-between;
+}
+
+.file-name {
+  color: #183449;
+  font-weight: 800;
+}
+
+.file-meta {
+  color: #657586;
+  font-size: 14px;
+  margin-top: 4px;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
 .composer {
   align-items: center;
   background: #ffffff;
   border-top: 1px solid #d9e1e8;
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto;
   padding: 14px 20px;
 }
 
@@ -285,5 +309,10 @@ input:focus {
 
   .composer {
     grid-template-columns: 1fr;
+  }
+
+  .file-attachment {
+    align-items: stretch;
+    flex-direction: column;
   }
 }

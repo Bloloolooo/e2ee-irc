@@ -1,9 +1,12 @@
-export type ClientToServerMessage = ChatCiphertextMessage;
+export type ClientToServerMessage =
+  | ChatCiphertextMessage
+  | FileCredentialCiphertextMessage;
 
 export type ServerToClientMessage =
   | ServerWelcomeMessage
   | ServerPresenceMessage
   | ChatCiphertextMessage
+  | FileCredentialCiphertextMessage
   | ServerErrorMessage;
 
 export interface ChatCiphertextMessage {
@@ -12,6 +15,17 @@ export interface ChatCiphertextMessage {
   id: string;
   sender: string;
   sentAt: number;
+  iv: string;
+  ciphertext: string;
+}
+
+export interface FileCredentialCiphertextMessage {
+  type: "file.credential.ciphertext";
+  version: 1;
+  id: string;
+  sender: string;
+  sentAt: number;
+  fileId: string;
   iv: string;
   ciphertext: string;
 }
@@ -35,6 +49,7 @@ export interface ServerErrorMessage {
 
 const MAX_ID_LENGTH = 80;
 const MAX_SENDER_LENGTH = 40;
+const MAX_FILE_ID_LENGTH = 80;
 const MAX_IV_LENGTH = 64;
 const MAX_CIPHERTEXT_LENGTH = 11_000;
 
@@ -51,7 +66,11 @@ export function parseClientMessage(raw: string): ClientToServerMessage | null {
     return null;
   }
 
-  if (parsed.type !== "chat.ciphertext" || parsed.version !== 1) {
+  if (parsed.type !== "chat.ciphertext" && parsed.type !== "file.credential.ciphertext") {
+    return null;
+  }
+
+  if (parsed.version !== 1) {
     return null;
   }
 
@@ -73,6 +92,23 @@ export function parseClientMessage(raw: string): ClientToServerMessage | null {
 
   if (!isBoundedString(parsed.ciphertext, 1, MAX_CIPHERTEXT_LENGTH)) {
     return null;
+  }
+
+  if (parsed.type === "file.credential.ciphertext") {
+    if (!isBoundedString(parsed.fileId, 1, MAX_FILE_ID_LENGTH)) {
+      return null;
+    }
+
+    return {
+      type: "file.credential.ciphertext",
+      version: 1,
+      id: parsed.id,
+      sender: parsed.sender,
+      sentAt: parsed.sentAt,
+      fileId: parsed.fileId,
+      iv: parsed.iv,
+      ciphertext: parsed.ciphertext
+    };
   }
 
   return {

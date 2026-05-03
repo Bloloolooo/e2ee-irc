@@ -2,7 +2,7 @@
 
 An experimental single-channel browser-based end-to-end encrypted IRC-like chat.
 
-The server is a WebSocket relay. It accepts connections, validates ciphertext envelopes, applies basic rate limits, tracks online count, and broadcasts ciphertext to connected browsers. Message plaintext is encrypted and decrypted only in the browser.
+The server is a WebSocket relay plus a small encrypted file object store. It accepts connections, validates ciphertext envelopes, applies basic rate limits, tracks online count, broadcasts ciphertext to connected browsers, and stores encrypted file chunks. Message plaintext and file plaintext are encrypted and decrypted only in the browser.
 
 ## Security Notes
 
@@ -12,11 +12,16 @@ The server is a WebSocket relay. It accepts connections, validates ciphertext en
 - Plaintext only exists briefly in browser memory.
 - Plaintext chat history is not persisted locally or on the server.
 - Refreshing the page clears the in-memory plaintext messages and requires the shared secret again.
+- Uploaded files are encrypted before upload; the server stores only encrypted chunks and encrypted metadata.
+- File downloads are decrypted in the browser. The downloaded plaintext file may be saved by the browser to the user's device.
+- Admin APIs manage encrypted file objects only; admin access does not grant plaintext access unless the admin also knows the shared secret.
 - If the shared secret leaks, message confidentiality fails.
 - If the server serves malicious frontend JavaScript, browser-based E2EE can be bypassed.
 - This is an experimental security project and should not be used directly for high-risk production communication.
 
 The MVP uses PBKDF2-SHA-256 with 250,000 iterations and fixed salt `single-channel-e2ee-irc-v1` to derive an AES-GCM 256-bit key from the user-entered shared secret. Each message uses a fresh random 12-byte IV.
+
+File transfer uses envelope encryption. The browser generates random per-file key material, wraps it with the shared-secret-derived channel key, imports it as an AES-GCM file key, and encrypts metadata and chunks with fresh IVs.
 
 ## Project Structure
 
@@ -46,6 +51,21 @@ Development URLs:
 - Web: `http://localhost:5173`
 - WebSocket server: `ws://localhost:3001/ws`
 - Health check: `http://localhost:3001/health`
+
+Encrypted uploaded files are stored under `apps/server/data/files` when running the server workspace, or under `data/files` when running the built server from the repository root. The `data` directory is ignored by git.
+
+Optional admin token:
+
+```bash
+ADMIN_TOKEN=change-me npm run dev -w apps/server
+```
+
+Admin endpoints:
+
+```bash
+curl -H "Authorization: Bearer change-me" http://localhost:3001/admin/files
+curl -X DELETE -H "Authorization: Bearer change-me" http://localhost:3001/admin/files/<fileId>
+```
 
 ## Build
 
@@ -91,7 +111,10 @@ VITE_WS_URL=wss://example.com/ws
 5. Refresh one window and confirm plaintext messages disappear.
 6. Rejoin one window with a different shared secret and confirm decrypt failure system messages appear.
 7. Confirm online count changes when windows join or leave.
+8. Upload a file under 20 MB and confirm the other window can download and decrypt it.
+9. Rejoin one window with a different shared secret and confirm file credential decryption fails.
+10. Use the admin API to list and delete encrypted file objects.
 
 ## Non-Goals
 
-This MVP intentionally does not implement multi-channel chat, registration, login, private messages, database persistence, server-side search, plaintext moderation, or server-side chat history.
+This project intentionally does not implement multi-channel chat, registration, member login, private messages, database persistence, server-side search, plaintext moderation, or server-side chat history.

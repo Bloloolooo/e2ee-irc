@@ -1,9 +1,12 @@
-export type ClientToServerMessage = ChatCiphertextMessage;
+export type ClientToServerMessage =
+  | ChatCiphertextMessage
+  | FileCredentialCiphertextMessage;
 
 export type ServerToClientMessage =
   | ServerWelcomeMessage
   | ServerPresenceMessage
   | ChatCiphertextMessage
+  | FileCredentialCiphertextMessage
   | ServerErrorMessage;
 
 export interface ChatCiphertextMessage {
@@ -12,6 +15,17 @@ export interface ChatCiphertextMessage {
   id: string;
   sender: string;
   sentAt: number;
+  iv: string;
+  ciphertext: string;
+}
+
+export interface FileCredentialCiphertextMessage {
+  type: "file.credential.ciphertext";
+  version: 1;
+  id: string;
+  sender: string;
+  sentAt: number;
+  fileId: string;
   iv: string;
   ciphertext: string;
 }
@@ -41,6 +55,30 @@ export interface ChatPlaintextMessage {
   sentAt: number;
 }
 
+export interface FileCredentialPlaintext {
+  type: "file.credential.plaintext";
+  id: string;
+  sender: string;
+  sentAt: number;
+  fileId: string;
+  wrappedFileKeyIv: string;
+  wrappedFileKey: string;
+  metadataIv: string;
+  encryptedMetadata: string;
+  chunkSize: number;
+  chunkCount: number;
+  totalCiphertextBytes: number;
+  expiresAt: number;
+}
+
+export interface FileMetadataPlaintext {
+  type: "file.metadata.plaintext";
+  filename: string;
+  mimeType: string;
+  size: number;
+  lastModified?: number;
+}
+
 export type LocalMessage =
   | {
       kind: "chat";
@@ -49,6 +87,21 @@ export type LocalMessage =
       text: string;
       sentAt: number;
       own: boolean;
+    }
+  | {
+      kind: "file";
+      id: string;
+      sender: string;
+      sentAt: number;
+      own: boolean;
+      fileId: string;
+      filename: string;
+      mimeType: string;
+      size: number;
+      expiresAt: number;
+      wrappedFileKeyIv: string;
+      wrappedFileKey: string;
+      chunkCount: number;
     }
   | {
       kind: "system";

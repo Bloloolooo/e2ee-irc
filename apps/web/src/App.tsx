@@ -1,12 +1,21 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   decryptMessage,
   deriveKeyFromSecret,
   encryptMessage
 } from "./crypto";
+import {
+  decryptFileCredentialForDisplay,
+  downloadEncryptedFile,
+  MAX_FILE_BYTES,
+  uploadEncryptedFile
+} from "./files";
 import type {
   ChatCiphertextMessage,
   ChatPlaintextMessage,
+  FileCredentialCiphertextMessage,
+  FileCredentialPlaintext,
+  FileMetadataPlaintext,
   LocalMessage,
   ServerToClientMessage
 } from "./types";
@@ -33,8 +42,11 @@ export default function App() {
   const [onlineCount, setOnlineCount] = useState(0);
   const [messages, setMessages] = useState<LocalMessage[]>([]);
   const [draft, setDraft] = useState("");
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
   const socketRef = useRef<EncryptedChatSocket | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const statusLabel = useMemo(() => {
     switch (status) {
@@ -158,6 +170,82 @@ export default function App() {
     }
   }
 
+  async function handleFileSelected(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+
+    if (!file || !session) {
+      return;
+    }
+
+    if (file.size > MAX_FILE_BYTES) {
+      appendSystemMessage("文件过大。当前版本限制为 20 MB。", "warning");
+      return;
+    }
+
+    try {
+      setUploadProgress(1);
+      const { credential } = await uploadEncryptedFile({
+        file,
+        channelKey: session.key,
+        sender: session.nickname,
+        onProgress: setUploadProgress
+      });
+      const encryptedCredential = await encryptMessage(session.key, credential);
+      const message: FileCredentialCiphertextMessage = {
+        type: "file.credential.ciphertext",
+        version: 1,
+        id: credential.id,
+        sender: session.nickname,
+        sentAt: credential.sentAt,
+        fileId: credential.fileId,
+        iv: encryptedCredential.iv,
+        ciphertext: encryptedCredential.ciphertext
+      };
+
+      socketRef.current?.send(message);
+      appendSystemMessage("加密文件已上传，凭据已广播", "info");
+    } catch {
+      appendSystemMessage("文件加密或上传失败", "error");
+    } finally {
+      setUploadProgress(null);
+    }
+  }
+
+  async function handleDownloadFile(message: Extract<LocalMessage, { kind: "file" }>) {
+    if (!session) {
+      return;
+    }
+
+    try {
+      setDownloadProgress((current) => ({ ...current, [message.fileId]: 1 }));
+      await downloadEncryptedFile({
+        fileId: message.fileId,
+        channelKey: session.key,
+        wrappedFileKeyIv: message.wrappedFileKeyIv,
+        wrappedFileKey: message.wrappedFileKey,
+        filename: message.filename,
+        mimeType: message.mimeType,
+        onProgress: (progress) => {
+          setDownloadProgress((current) => ({
+            ...current,
+            [message.fileId]: progress
+          }));
+        }
+      });
+    } catch {
+      appendSystemMessage("文件下载或解密失败，文件可能已过期、删除，或 shared secret 不一致。", "warning");
+    } finally {
+      window.setTimeout(() => {
+        setDownloadProgress((current) => {
+          const next = { ...current };
+          delete next[message.fileId];
+          return next;
+        });
+      }, 800);
+    }
+  }
+
   async function handleServerMessage(
     message: ServerToClientMessage,
     activeSession: Session
@@ -174,6 +262,53 @@ export default function App() {
 
     if (message.type === "server.error") {
       appendSystemMessage(serverErrorToText(message.error), "warning");
+      return;
+    }
+
+    if (message.type === "file.credential.ciphertext") {
+      try {
+        const credential = await decryptMessage<FileCredentialPlaintext>(
+          activeSession.key,
+          message.iv,
+          message.ciphertext
+        );
+
+        if (!isValidFileCredential(credential)) {
+          appendSystemMessage("收到一条解密后格式无效的文件凭据", "warning");
+          return;
+        }
+
+        const metadata = await decryptFileCredentialForDisplay(
+          activeSession.key,
+          credential
+        );
+
+        if (!isValidFileMetadata(metadata)) {
+          appendSystemMessage("收到一条解密后格式无效的文件信息", "warning");
+          return;
+        }
+
+        appendChatMessage({
+          kind: "file",
+          id: credential.id,
+          sender: credential.sender,
+          sentAt: credential.sentAt,
+          own: credential.sender === activeSession.nickname,
+          fileId: credential.fileId,
+          filename: metadata.filename,
+          mimeType: metadata.mimeType,
+          size: metadata.size,
+          expiresAt: credential.expiresAt,
+          wrappedFileKeyIv: credential.wrappedFileKeyIv,
+          wrappedFileKey: credential.wrappedFileKey,
+          chunkCount: credential.chunkCount
+        });
+      } catch {
+        appendSystemMessage(
+          "收到一条无法解密的文件凭据。可能是 shared secret 不一致。",
+          "warning"
+        );
+      }
       return;
     }
 
@@ -211,7 +346,10 @@ export default function App() {
 
   function appendChatMessage(message: LocalMessage) {
     setMessages((current) => {
-      if (message.kind === "chat" && current.some((item) => item.id === message.id)) {
+      if (
+        (message.kind === "chat" || message.kind === "file") &&
+        current.some((item) => item.id === message.id)
+      ) {
         return current;
       }
       return [...current, message];
@@ -312,7 +450,7 @@ export default function App() {
                   <span>{formatTime(message.sentAt)}</span>
                   <p>{message.text}</p>
                 </article>
-              ) : (
+              ) : message.kind === "chat" ? (
                 <article
                   className={`message chat-message ${message.own ? "own" : ""}`}
                   key={message.id}
@@ -323,6 +461,33 @@ export default function App() {
                   </div>
                   <p>{message.text}</p>
                 </article>
+              ) : (
+                <article
+                  className={`message file-message ${message.own ? "own" : ""}`}
+                  key={message.id}
+                >
+                  <div className="message-meta">
+                    <strong>{message.sender}</strong>
+                    <span>{formatTime(message.sentAt)}</span>
+                  </div>
+                  <div className="file-attachment">
+                    <div>
+                      <p className="file-name">{message.filename}</p>
+                      <p className="file-meta">
+                        {formatBytes(message.size)} · {message.chunkCount} chunks · expires {formatTime(message.expiresAt)}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleDownloadFile(message)}
+                      disabled={downloadProgress[message.fileId] !== undefined}
+                    >
+                      {downloadProgress[message.fileId] !== undefined
+                        ? `${downloadProgress[message.fileId]}%`
+                        : "Download"}
+                    </button>
+                  </div>
+                </article>
               )
             )
           )}
@@ -331,12 +496,27 @@ export default function App() {
 
       <form className="composer" onSubmit={handleSend}>
         <input
+          ref={fileInputRef}
+          className="hidden-file-input"
+          type="file"
+          onChange={handleFileSelected}
+          aria-label="Attach encrypted file"
+        />
+        <input
           value={draft}
           maxLength={MAX_PLAINTEXT_CHARS + 1}
           onChange={(event) => setDraft(event.target.value)}
           placeholder="Type encrypted message..."
           aria-label="Message"
         />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={status !== "connected" || uploadProgress !== null}
+          title="Attach encrypted file"
+        >
+          {uploadProgress !== null ? `${uploadProgress}%` : "Attach"}
+        </button>
         <button type="submit" disabled={status !== "connected"}>
           Send
         </button>
@@ -361,6 +541,18 @@ function formatTime(timestamp: number): string {
     minute: "2-digit",
     second: "2-digit"
   }).format(new Date(timestamp));
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function serverErrorToText(error: string): string {
@@ -388,5 +580,42 @@ function isValidPlaintextMessage(value: unknown): value is ChatPlaintextMessage 
     typeof record.sender === "string" &&
     typeof record.text === "string" &&
     Number.isSafeInteger(record.sentAt)
+  );
+}
+
+function isValidFileCredential(value: unknown): value is FileCredentialPlaintext {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return (
+    record.type === "file.credential.plaintext" &&
+    typeof record.id === "string" &&
+    typeof record.sender === "string" &&
+    typeof record.fileId === "string" &&
+    typeof record.wrappedFileKeyIv === "string" &&
+    typeof record.wrappedFileKey === "string" &&
+    typeof record.metadataIv === "string" &&
+    typeof record.encryptedMetadata === "string" &&
+    Number.isSafeInteger(record.sentAt) &&
+    Number.isSafeInteger(record.chunkSize) &&
+    Number.isSafeInteger(record.chunkCount) &&
+    Number.isSafeInteger(record.totalCiphertextBytes) &&
+    Number.isSafeInteger(record.expiresAt)
+  );
+}
+
+function isValidFileMetadata(value: unknown): value is FileMetadataPlaintext {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return (
+    record.type === "file.metadata.plaintext" &&
+    typeof record.filename === "string" &&
+    typeof record.mimeType === "string" &&
+    Number.isSafeInteger(record.size)
   );
 }

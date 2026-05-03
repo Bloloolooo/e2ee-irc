@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
 import http from "node:http";
+import path from "node:path";
 import express from "express";
 import { WebSocket, WebSocketServer } from "ws";
+import { FileStore, MAX_CHUNK_BYTES } from "./fileStore.js";
 import { ConnectionRateLimiter } from "./rateLimit.js";
 import {
   parseClientMessage,
@@ -11,6 +13,7 @@ import {
 
 const PORT = Number(process.env.PORT ?? 3001);
 const MAX_MESSAGE_BYTES = 8 * 1024;
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 
 interface ClientState {
   connectionId: string;
@@ -21,9 +24,82 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 const clients = new Map<WebSocket, ClientState>();
+const fileStore = new FileStore(path.resolve(process.cwd(), "data", "files"));
+
+app.use(express.json({ limit: "64kb" }));
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true, onlineCount: clients.size });
+});
+
+app.post("/files", async (req, res) => {
+  try {
+    const manifest = await fileStore.createManifest(req.body);
+    res.status(201).json({
+      fileId: manifest.fileId,
+      expiresAt: manifest.expiresAt,
+      chunkCount: manifest.chunkCount
+    });
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
+app.put(
+  "/files/:fileId/chunks/:index",
+  express.raw({
+    type: "application/octet-stream",
+    limit: MAX_CHUNK_BYTES
+  }),
+  async (req, res) => {
+    try {
+      const index = Number(req.params.index);
+      const iv = req.header("x-chunk-iv") ?? "";
+      const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      const manifest = await fileStore.putChunk(req.params.fileId, index, iv, body);
+      res.json({
+        fileId: manifest.fileId,
+        index,
+        uploaded: true
+      });
+    } catch (error) {
+      sendHttpError(res, error);
+    }
+  }
+);
+
+app.get("/files/:fileId/manifest", async (req, res) => {
+  try {
+    res.json(await fileStore.getPublicManifest(req.params.fileId));
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
+app.get("/files/:fileId/chunks/:index", async (req, res) => {
+  try {
+    const chunk = await fileStore.getChunk(req.params.fileId, Number(req.params.index));
+    res.type("application/octet-stream").send(chunk);
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
+app.get("/admin/files", requireAdmin, async (_req, res) => {
+  try {
+    res.json({ files: await fileStore.listAdminFiles() });
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
+app.delete("/admin/files/:fileId", requireAdmin, async (req, res) => {
+  try {
+    await fileStore.deleteFile(req.params.fileId);
+    res.status(204).send();
+  } catch (error) {
+    sendHttpError(res, error);
+  }
 });
 
 wss.on("connection", (socket, req) => {
@@ -102,6 +178,13 @@ server.listen(PORT, () => {
   console.info(`e2ee-irc server listening on http://localhost:${PORT}`);
 });
 
+void fileStore.ensureReady();
+setInterval(() => {
+  fileStore.cleanupExpired().catch((error) => {
+    console.warn("file cleanup failed", { message: error.message });
+  });
+}, 60 * 60 * 1000).unref();
+
 function normalizeMessage(data: WebSocket.RawData): string | null {
   if (typeof data === "string") {
     return data;
@@ -142,4 +225,38 @@ function send(socket: WebSocket, message: ServerToClientMessage): void {
   if (socket.readyState === WebSocket.OPEN) {
     socket.send(serializeServerMessage(message));
   }
+}
+
+function requireAdmin(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+): void {
+  const header = req.header("authorization") ?? "";
+  const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+
+  if (!ADMIN_TOKEN || token !== ADMIN_TOKEN) {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+
+  next();
+}
+
+function sendHttpError(res: express.Response, error: unknown): void {
+  const message = error instanceof Error ? error.message : "unknown_error";
+  const status = errorStatus(message);
+  res.status(status).json({ error: message });
+}
+
+function errorStatus(message: string): number {
+  if (message.includes("expired") || message.includes("missing") || message.includes("incomplete")) {
+    return 404;
+  }
+
+  if (message.includes("invalid") || message.includes("exceeded") || message.includes("large")) {
+    return 400;
+  }
+
+  return 500;
 }
