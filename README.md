@@ -52,7 +52,7 @@ Development URLs:
 - WebSocket server: `ws://localhost:3001/ws`
 - Health check: `http://localhost:3001/health`
 
-WebCrypto requires a secure browser context. For local development, open the app with `http://localhost:5173`. Some browsers, including Arc on macOS, may block `crypto.subtle` when the app is opened through a LAN URL such as `http://192.168.x.x:5173`. For network-device testing, use HTTPS.
+WebCrypto requires a secure browser context. For local development, open the app with `http://localhost:5173`. For LAN or public access, use HTTPS. Browsers may block `crypto.subtle` on plain HTTP origins such as `http://192.168.x.x:5173` or `http://<public-ip>`, and the app cannot safely bypass that browser restriction.
 
 Encrypted uploaded files are stored under `apps/server/data/files` when running the server workspace, or under `data/files` when running the built server from the repository root. The `data` directory is ignored by git.
 
@@ -81,7 +81,29 @@ npm run build
 npm run start
 ```
 
-`npm run start` starts the built server. In a production deployment, build the web app and serve `apps/web/dist` with your static host or reverse proxy WebSocket requests to `/ws`.
+`npm run start` starts the built server. After `npm run build`, the server also serves the built frontend from `apps/web/dist` when run from the repository root, so a single origin can host the page, file APIs, and `/ws` WebSocket.
+
+## HTTPS Deployment
+
+Browser E2EE requires `crypto.subtle`, which means public deployments must use HTTPS. Plain `http://<public-ip>` will fail in browsers that enforce secure-context rules.
+
+Recommended production shape:
+
+- Put the app behind a reverse proxy such as Caddy, Nginx, Cloudflare, or another TLS terminator.
+- Use a real domain name with a trusted TLS certificate.
+- Proxy WebSocket upgrades for `/ws` to the Node server.
+
+The Node server can also serve HTTPS directly if you provide certificate files:
+
+```bash
+npm run build
+TLS_CERT_PATH=/path/to/fullchain.pem \
+TLS_KEY_PATH=/path/to/privkey.pem \
+PORT=3443 \
+npm run start
+```
+
+If you must use a public IP directly, the certificate still has to be trusted by the browser and valid for that IP address. Most public TLS workflows are domain-based, so using a domain is the practical path.
 
 ## WebSocket Configuration
 

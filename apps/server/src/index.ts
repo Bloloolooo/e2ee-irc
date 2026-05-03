@@ -1,6 +1,9 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import http from "node:http";
+import https from "node:https";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import express from "express";
 import { WebSocket, WebSocketServer } from "ws";
 import { FileStore, MAX_CHUNK_BYTES } from "./fileStore.js";
@@ -14,6 +17,11 @@ import {
 const PORT = Number(process.env.PORT ?? 3001);
 const MAX_MESSAGE_BYTES = 8 * 1024;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+const TLS_CERT_PATH = process.env.TLS_CERT_PATH;
+const TLS_KEY_PATH = process.env.TLS_KEY_PATH;
+const CURRENT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const WEB_DIST_DIR =
+  process.env.WEB_DIST_DIR ?? path.resolve(CURRENT_DIR, "..", "..", "web", "dist");
 
 interface ClientState {
   connectionId: string;
@@ -21,7 +29,7 @@ interface ClientState {
 }
 
 const app = express();
-const server = http.createServer(app);
+const server = createHttpServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 const clients = new Map<WebSocket, ClientState>();
 const fileStore = new FileStore(path.resolve(process.cwd(), "data", "files"));
@@ -102,6 +110,23 @@ app.delete("/admin/files/:fileId", requireAdmin, async (req, res) => {
   }
 });
 
+if (fs.existsSync(WEB_DIST_DIR)) {
+  app.use(express.static(WEB_DIST_DIR));
+  app.get("*", (req, res, next) => {
+    if (
+      req.path.startsWith("/files") ||
+      req.path.startsWith("/admin") ||
+      req.path.startsWith("/health") ||
+      req.path.startsWith("/ws")
+    ) {
+      next();
+      return;
+    }
+
+    res.sendFile(path.join(WEB_DIST_DIR, "index.html"));
+  });
+}
+
 wss.on("connection", (socket, req) => {
   const connectionId = crypto.randomUUID();
   clients.set(socket, {
@@ -175,7 +200,8 @@ wss.on("connection", (socket, req) => {
 });
 
 server.listen(PORT, () => {
-  console.info(`e2ee-irc server listening on http://localhost:${PORT}`);
+  const protocol = isHttpsServer() ? "https" : "http";
+  console.info(`e2ee-irc server listening on ${protocol}://localhost:${PORT}`);
 });
 
 void fileStore.ensureReady();
@@ -203,6 +229,24 @@ function normalizeMessage(data: WebSocket.RawData): string | null {
   }
 
   return null;
+}
+
+function createHttpServer(appInstance: express.Express): http.Server | https.Server {
+  if (TLS_CERT_PATH && TLS_KEY_PATH) {
+    return https.createServer(
+      {
+        cert: fs.readFileSync(TLS_CERT_PATH),
+        key: fs.readFileSync(TLS_KEY_PATH)
+      },
+      appInstance
+    );
+  }
+
+  return http.createServer(appInstance);
+}
+
+function isHttpsServer(): boolean {
+  return Boolean(TLS_CERT_PATH && TLS_KEY_PATH);
 }
 
 function broadcastPresence(): void {
