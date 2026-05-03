@@ -2,7 +2,8 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "re
 import {
   decryptMessage,
   deriveKeyFromSecret,
-  encryptMessage
+  encryptMessage,
+  WebCryptoUnavailableError
 } from "./crypto";
 import {
   decryptFileCredentialForDisplay,
@@ -117,8 +118,15 @@ export default function App() {
       setSecretInput("");
       setMessages([]);
       setSession({ nickname, key });
-    } catch {
-      setJoinError("密钥派生失败，请确认浏览器支持 WebCrypto");
+    } catch (error) {
+      if (error instanceof WebCryptoUnavailableError) {
+        setJoinError(
+          "当前页面无法使用 WebCrypto。请用 https:// 或 http://localhost 打开；不要用 http://局域网 IP。"
+        );
+        return;
+      }
+
+      setJoinError("密钥派生失败，请检查浏览器 WebCrypto 支持");
     } finally {
       setIsJoining(false);
     }

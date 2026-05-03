@@ -52,6 +52,8 @@ Development URLs:
 - WebSocket server: `ws://localhost:3001/ws`
 - Health check: `http://localhost:3001/health`
 
+WebCrypto requires a secure browser context. For local development, open the app with `http://localhost:5173`. Some browsers, including Arc on macOS, may block `crypto.subtle` when the app is opened through a LAN URL such as `http://192.168.x.x:5173`. For network-device testing, use HTTPS.
+
 Encrypted uploaded files are stored under `apps/server/data/files` when running the server workspace, or under `data/files` when running the built server from the repository root. The `data` directory is ignored by git.
 
 Optional admin token:

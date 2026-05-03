@@ -4,8 +4,20 @@ const PBKDF2_ITERATIONS = 250_000;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+export class WebCryptoUnavailableError extends Error {
+  constructor() {
+    super("webcrypto_unavailable");
+    this.name = "WebCryptoUnavailableError";
+  }
+}
+
+export function isWebCryptoAvailable(): boolean {
+  return Boolean(globalThis.crypto?.subtle && globalThis.isSecureContext);
+}
+
 export async function deriveKeyFromSecret(secret: string): Promise<CryptoKey> {
-  const baseKey = await crypto.subtle.importKey(
+  const subtle = getSubtleCrypto();
+  const baseKey = await subtle.importKey(
     "raw",
     encoder.encode(secret),
     "PBKDF2",
@@ -13,7 +25,7 @@ export async function deriveKeyFromSecret(secret: string): Promise<CryptoKey> {
     ["deriveKey"]
   );
 
-  return crypto.subtle.deriveKey(
+  return subtle.deriveKey(
     {
       name: "PBKDF2",
       hash: "SHA-256",
@@ -34,9 +46,10 @@ export async function encryptMessage(
   key: CryptoKey,
   plaintext: object
 ): Promise<{ iv: string; ciphertext: string }> {
+  const subtle = getSubtleCrypto();
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encodedPlaintext = encoder.encode(JSON.stringify(plaintext));
-  const encrypted = await crypto.subtle.encrypt(
+  const encrypted = await subtle.encrypt(
     { name: "AES-GCM", iv: toArrayBuffer(iv) },
     key,
     encodedPlaintext
@@ -52,8 +65,9 @@ export async function encryptBytes(
   key: CryptoKey,
   plaintext: Uint8Array
 ): Promise<{ iv: string; ciphertext: Uint8Array }> {
+  const subtle = getSubtleCrypto();
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const encrypted = await crypto.subtle.encrypt(
+  const encrypted = await subtle.encrypt(
     { name: "AES-GCM", iv: toArrayBuffer(iv) },
     key,
     toArrayBuffer(plaintext)
@@ -70,8 +84,9 @@ export async function decryptBytes(
   ivBase64: string,
   ciphertext: Uint8Array
 ): Promise<Uint8Array> {
+  const subtle = getSubtleCrypto();
   const iv = base64ToBytes(ivBase64);
-  const decrypted = await crypto.subtle.decrypt(
+  const decrypted = await subtle.decrypt(
     { name: "AES-GCM", iv: toArrayBuffer(iv) },
     key,
     toArrayBuffer(ciphertext)
@@ -81,7 +96,7 @@ export async function decryptBytes(
 }
 
 export async function importAesGcmKey(rawKey: Uint8Array): Promise<CryptoKey> {
-  return crypto.subtle.importKey(
+  return getSubtleCrypto().importKey(
     "raw",
     toArrayBuffer(rawKey),
     "AES-GCM",
@@ -95,9 +110,10 @@ export async function decryptMessage<T>(
   ivBase64: string,
   ciphertextBase64: string
 ): Promise<T> {
+  const subtle = getSubtleCrypto();
   const iv = base64ToBytes(ivBase64);
   const ciphertext = base64ToBytes(ciphertextBase64);
-  const decrypted = await crypto.subtle.decrypt(
+  const decrypted = await subtle.decrypt(
     { name: "AES-GCM", iv: toArrayBuffer(iv) },
     key,
     toArrayBuffer(ciphertext)
@@ -128,4 +144,12 @@ export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
     bytes.byteOffset,
     bytes.byteOffset + bytes.byteLength
   ) as ArrayBuffer;
+}
+
+function getSubtleCrypto(): SubtleCrypto {
+  if (!globalThis.crypto?.subtle || !globalThis.isSecureContext) {
+    throw new WebCryptoUnavailableError();
+  }
+
+  return globalThis.crypto.subtle;
 }
