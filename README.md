@@ -6,7 +6,8 @@ The server is a WebSocket relay plus a small encrypted file object store. It acc
 
 ## Security Notes
 
-- The server does not receive the shared secret.
+- The server does not receive the browser-entered shared secret.
+- The shared secret is also used to derive a channel auth proof. The proof is sent to the server so only users with the shared secret can enter the channel.
 - The server does not derive or store the AES key.
 - The server does not decrypt messages.
 - Plaintext only exists briefly in browser memory.
@@ -14,14 +15,17 @@ The server is a WebSocket relay plus a small encrypted file object store. It acc
 - Refreshing the page clears the in-memory plaintext messages and requires the shared secret again.
 - Uploaded files are encrypted before upload; the server stores only encrypted chunks and encrypted metadata.
 - File downloads are decrypted in the browser. The downloaded plaintext file may be saved by the browser to the user's device.
-- Admin APIs manage encrypted file objects only; admin access does not grant plaintext access unless the admin also knows the shared secret.
+- Admin APIs manage encrypted file objects only. Admin identity is the configured `ADMIN_NICKNAME` inside the authenticated channel.
+- `ADMIN_NICKNAME` is nickname-based administration, not a separate strong account system. Anyone who knows the shared secret and uses that nickname can act as admin.
 - If the shared secret leaks, message confidentiality fails.
 - If the server serves malicious frontend JavaScript, browser-based E2EE can be bypassed.
 - This is an experimental security project and should not be used directly for high-risk production communication.
 
-The MVP uses PBKDF2-SHA-256 with 250,000 iterations and fixed salt `single-channel-e2ee-irc-v1` to derive an AES-GCM 256-bit key from the user-entered shared secret. Each message uses a fresh random 12-byte IV.
+The client uses PBKDF2-SHA-256 with 250,000 iterations and fixed salt `single-channel-e2ee-irc-v1` to derive an AES-GCM 256-bit encryption key from the user-entered shared secret. It also derives a separate channel auth proof with salt `single-channel-e2ee-irc-v1/auth`. Each message uses a fresh random 12-byte IV.
 
 File transfer uses envelope encryption. The browser generates random per-file key material, wraps it with the shared-secret-derived channel key, imports it as an AES-GCM file key, and encrypts metadata and chunks with fresh IVs.
+
+On HTTPS and localhost, the browser uses WebCrypto. On plain HTTP IP origins, where browsers often disable `crypto.subtle`, the client falls back to a JavaScript AES-GCM/PBKDF2 implementation so IP-based access can still work. HTTP mode is usable, but HTTPS remains the safer deployment mode because HTTP cannot protect the delivered frontend JavaScript from network tampering.
 
 ## Project Structure
 
@@ -40,10 +44,10 @@ Install dependencies:
 npm install
 ```
 
-Run both apps:
+Run both apps with a channel secret:
 
 ```bash
-npm run dev
+CHANNEL_SHARED_SECRET=change-me ADMIN_NICKNAME=alice npm run dev
 ```
 
 Development URLs:
@@ -52,21 +56,23 @@ Development URLs:
 - WebSocket server: `ws://localhost:3001/ws`
 - Health check: `http://localhost:3001/health`
 
-WebCrypto requires a secure browser context. For local development, open the app with `http://localhost:5173`. For LAN or public access, use HTTPS. Browsers may block `crypto.subtle` on plain HTTP origins such as `http://192.168.x.x:5173` or `http://<public-ip>`, and the app cannot safely bypass that browser restriction.
+For LAN or public IP development through Vite, open `http://<server-ip>:5173`. The client connects its WebSocket to `ws://<server-ip>:3001/ws` by default in development.
 
 Encrypted uploaded files are stored under `apps/server/data/files` when running the server workspace, or under `data/files` when running the built server from the repository root. The `data` directory is ignored by git.
 
-Optional admin token:
+Channel and admin configuration:
 
 ```bash
-ADMIN_TOKEN=change-me npm run dev -w apps/server
+CHANNEL_SHARED_SECRET=change-me ADMIN_NICKNAME=alice npm run dev -w apps/server
 ```
+
+`CHANNEL_SHARED_SECRET` is convenient for development because the server derives the expected auth proof at startup. For deployments where you do not want the server environment to contain the shared secret, provide `CHANNEL_AUTH_TOKEN` instead. It must equal the client-derived PBKDF2 auth proof for the chosen shared secret.
 
 Admin endpoints:
 
 ```bash
-curl -H "Authorization: Bearer change-me" http://localhost:3001/admin/files
-curl -X DELETE -H "Authorization: Bearer change-me" http://localhost:3001/admin/files/<fileId>
+curl -H "x-nickname: alice" -H "x-channel-auth: <derived-proof>" http://localhost:3001/admin/files
+curl -X DELETE -H "x-nickname: alice" -H "x-channel-auth: <derived-proof>" http://localhost:3001/admin/files/<fileId>
 ```
 
 ## Build
@@ -83,9 +89,14 @@ npm run start
 
 `npm run start` starts the built server. After `npm run build`, the server also serves the built frontend from `apps/web/dist` when run from the repository root, so a single origin can host the page, file APIs, and `/ws` WebSocket.
 
+```bash
+npm run build
+CHANNEL_SHARED_SECRET=change-me ADMIN_NICKNAME=alice npm run start
+```
+
 ## HTTPS Deployment
 
-Browser E2EE requires `crypto.subtle`, which means public deployments must use HTTPS. Plain `http://<public-ip>` will fail in browsers that enforce secure-context rules.
+Public deployments should use HTTPS. Plain `http://<public-ip>` now works through the JavaScript crypto fallback, but it cannot provide the same frontend integrity guarantees as HTTPS.
 
 Recommended production shape:
 
@@ -107,10 +118,11 @@ If you must use a public IP directly, the certificate still has to be trusted by
 
 ## WebSocket Configuration
 
-In development the client connects to:
+In development the client connects to the current hostname on port `3001`, for example:
 
 ```text
 ws://localhost:3001/ws
+ws://192.168.1.10:3001/ws
 ```
 
 In production it uses the current host:
@@ -128,16 +140,16 @@ VITE_WS_URL=wss://example.com/ws
 
 ## Local Acceptance Checks
 
-1. Open two browser windows at `http://localhost:5173`.
-2. Enter the same shared secret in both windows.
-3. Send messages both ways and confirm they decrypt.
-4. Confirm server logs show connection and ciphertext metadata, not plaintext.
-5. Refresh one window and confirm plaintext messages disappear.
-6. Rejoin one window with a different shared secret and confirm decrypt failure system messages appear.
-7. Confirm online count changes when windows join or leave.
-8. Upload a file under 20 MB and confirm the other window can download and decrypt it.
-9. Rejoin one window with a different shared secret and confirm file credential decryption fails.
-10. Use the admin API to list and delete encrypted file objects.
+1. Start with `CHANNEL_SHARED_SECRET=change-me ADMIN_NICKNAME=alice npm run dev`.
+2. Open two browser windows at `http://localhost:5173` or `http://<server-ip>:5173`.
+3. Enter the same shared secret in both windows.
+4. Send messages both ways and confirm they decrypt.
+5. Confirm server logs show connection and ciphertext metadata, not plaintext.
+6. Refresh one window and confirm plaintext messages disappear.
+7. Try a different shared secret and confirm the client cannot enter the channel.
+8. Confirm online count changes when windows join or leave.
+9. Upload a file under 20 MB and confirm the other window can download and decrypt it.
+10. Use the configured admin nickname to list and delete encrypted file objects.
 
 ## Non-Goals
 

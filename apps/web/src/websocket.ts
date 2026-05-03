@@ -7,6 +7,8 @@ export type ConnectionStatus =
   | "reconnecting";
 
 interface EncryptedChatSocketOptions {
+  nickname: string;
+  authProof: string;
   onStatusChange(status: ConnectionStatus): void;
   onMessage(message: ServerToClientMessage): void;
   onSystemMessage(message: string): void;
@@ -49,7 +51,9 @@ export class EncryptedChatSocket {
       this.reconnectAttempts > 0 ? "reconnecting" : "connecting"
     );
 
-    const socket = new WebSocket(getWebSocketUrl());
+    const socket = new WebSocket(
+      getWebSocketUrl(this.options.nickname, this.options.authProof)
+    );
     this.socket = socket;
 
     socket.addEventListener("open", () => {
@@ -67,8 +71,15 @@ export class EncryptedChatSocket {
       }
     });
 
-    socket.addEventListener("close", () => {
+    socket.addEventListener("close", (event) => {
       if (!this.shouldReconnect) {
+        return;
+      }
+
+      if (event.code === 1008) {
+        this.shouldReconnect = false;
+        this.options.onStatusChange("disconnected");
+        this.options.onSystemMessage("无法进入频道：shared secret 不正确，或服务端未配置频道密钥。");
         return;
       }
 
@@ -91,16 +102,17 @@ export class EncryptedChatSocket {
   }
 }
 
-function getWebSocketUrl(): string {
+function getWebSocketUrl(nickname: string, authProof: string): string {
   const configuredUrl = import.meta.env.VITE_WS_URL as string | undefined;
-  if (configuredUrl) {
-    return configuredUrl;
-  }
+  const devProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const baseUrl = configuredUrl
+    ? configuredUrl
+    : import.meta.env.DEV
+      ? `${devProtocol}//${window.location.hostname}:3001/ws`
+      : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`;
 
-  if (import.meta.env.DEV) {
-    return "ws://localhost:3001/ws";
-  }
-
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/ws`;
+  const url = new URL(baseUrl);
+  url.searchParams.set("nickname", nickname);
+  url.searchParams.set("auth", authProof);
+  return url.toString();
 }

@@ -5,6 +5,7 @@ import {
   encryptMessage,
   WebCryptoUnavailableError
 } from "./crypto";
+import type { AppCryptoKey } from "./crypto";
 import {
   decryptFileCredentialForDisplay,
   downloadEncryptedFile,
@@ -30,7 +31,8 @@ type SystemMessageLevel = Extract<LocalMessage, { kind: "system" }>["level"];
 
 interface Session {
   nickname: string;
-  key: CryptoKey;
+  key: AppCryptoKey;
+  authProof: string;
 }
 
 export default function App() {
@@ -68,6 +70,8 @@ export default function App() {
     }
 
     const chatSocket = new EncryptedChatSocket({
+      nickname: session.nickname,
+      authProof: session.authProof,
       onStatusChange: setStatus,
       onMessage: (message) => {
         void handleServerMessage(message, session);
@@ -114,10 +118,10 @@ export default function App() {
 
     try {
       setIsJoining(true);
-      const key = await deriveKeyFromSecret(secret);
+      const derived = await deriveKeyFromSecret(secret);
       setSecretInput("");
       setMessages([]);
-      setSession({ nickname, key });
+      setSession({ nickname, key: derived.key, authProof: derived.authProof });
     } catch (error) {
       if (error instanceof WebCryptoUnavailableError) {
         setJoinError(
@@ -196,6 +200,7 @@ export default function App() {
       const { credential } = await uploadEncryptedFile({
         file,
         channelKey: session.key,
+        authProof: session.authProof,
         sender: session.nickname,
         onProgress: setUploadProgress
       });
@@ -230,6 +235,8 @@ export default function App() {
       await downloadEncryptedFile({
         fileId: message.fileId,
         channelKey: session.key,
+        authProof: session.authProof,
+        nickname: session.nickname,
         wrappedFileKeyIv: message.wrappedFileKeyIv,
         wrappedFileKey: message.wrappedFileKey,
         filename: message.filename,
@@ -571,6 +578,10 @@ function serverErrorToText(error: string): string {
       return "发送过快，请稍后再试";
     case "invalid_message":
       return "服务器拒绝了一条格式无效的消息";
+    case "invalid_channel_key":
+      return "无法进入频道：shared secret 不正确";
+    case "channel_auth_not_configured":
+      return "服务端未配置频道密钥";
     default:
       return "服务器返回错误";
   }

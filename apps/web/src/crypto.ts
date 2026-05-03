@@ -1,8 +1,28 @@
+import { gcm } from "@noble/ciphers/aes.js";
+import { pbkdf2 } from "@noble/hashes/pbkdf2.js";
+import { sha256 } from "@noble/hashes/sha2.js";
+
 const KEY_SALT = "single-channel-e2ee-irc-v1";
+const AUTH_SALT = "single-channel-e2ee-irc-v1/auth";
 const PBKDF2_ITERATIONS = 250_000;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+export type AppCryptoKey =
+  | {
+      kind: "webcrypto";
+      key: CryptoKey;
+    }
+  | {
+      kind: "js";
+      keyBytes: Uint8Array;
+    };
+
+export interface DerivedChannelKeys {
+  key: AppCryptoKey;
+  authProof: string;
+}
 
 export class WebCryptoUnavailableError extends Error {
   constructor() {
@@ -15,8 +35,16 @@ export function isWebCryptoAvailable(): boolean {
   return Boolean(globalThis.crypto?.subtle && globalThis.isSecureContext);
 }
 
-export async function deriveKeyFromSecret(secret: string): Promise<CryptoKey> {
-  const subtle = getSubtleCrypto();
+export async function deriveKeyFromSecret(secret: string): Promise<DerivedChannelKeys> {
+  if (!hasRandomValues()) {
+    throw new WebCryptoUnavailableError();
+  }
+
+  if (!isWebCryptoAvailable()) {
+    return deriveKeyWithJsCrypto(secret);
+  }
+
+  const subtle = globalThis.crypto.subtle;
   const baseKey = await subtle.importKey(
     "raw",
     encoder.encode(secret),
@@ -24,52 +52,104 @@ export async function deriveKeyFromSecret(secret: string): Promise<CryptoKey> {
     false,
     ["deriveKey"]
   );
-
-  return subtle.deriveKey(
-    {
-      name: "PBKDF2",
-      hash: "SHA-256",
-      salt: encoder.encode(KEY_SALT),
-      iterations: PBKDF2_ITERATIONS
-    },
-    baseKey,
-    {
-      name: "AES-GCM",
-      length: 256
-    },
+  const authBaseKey = await subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    "PBKDF2",
     false,
-    ["encrypt", "decrypt"]
+    ["deriveBits"]
   );
+
+  const [key, authBits] = await Promise.all([
+    subtle.deriveKey(
+      {
+        name: "PBKDF2",
+        hash: "SHA-256",
+        salt: encoder.encode(KEY_SALT),
+        iterations: PBKDF2_ITERATIONS
+      },
+      baseKey,
+      {
+        name: "AES-GCM",
+        length: 256
+      },
+      false,
+      ["encrypt", "decrypt"]
+    ),
+    subtle.deriveBits(
+      {
+        name: "PBKDF2",
+        hash: "SHA-256",
+        salt: encoder.encode(AUTH_SALT),
+        iterations: PBKDF2_ITERATIONS
+      },
+      authBaseKey,
+      256
+    )
+  ]);
+
+  return {
+    key: { kind: "webcrypto", key },
+    authProof: bytesToBase64(new Uint8Array(authBits))
+  };
+}
+
+function deriveKeyWithJsCrypto(secret: string): DerivedChannelKeys {
+  const secretBytes = encoder.encode(secret);
+  return {
+    key: {
+      kind: "js",
+      keyBytes: pbkdf2(sha256, secretBytes, encoder.encode(KEY_SALT), {
+        c: PBKDF2_ITERATIONS,
+        dkLen: 32
+      })
+    },
+    authProof: bytesToBase64(
+      pbkdf2(sha256, secretBytes, encoder.encode(AUTH_SALT), {
+        c: PBKDF2_ITERATIONS,
+        dkLen: 32
+      })
+    )
+  };
+}
+
+export function randomBytes(length: number): Uint8Array {
+  if (!hasRandomValues()) {
+    throw new WebCryptoUnavailableError();
+  }
+
+  return globalThis.crypto.getRandomValues(new Uint8Array(length));
 }
 
 export async function encryptMessage(
-  key: CryptoKey,
+  key: AppCryptoKey,
   plaintext: object
 ): Promise<{ iv: string; ciphertext: string }> {
-  const subtle = getSubtleCrypto();
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const encodedPlaintext = encoder.encode(JSON.stringify(plaintext));
-  const encrypted = await subtle.encrypt(
-    { name: "AES-GCM", iv: toArrayBuffer(iv) },
-    key,
-    encodedPlaintext
-  );
+  const encrypted = await encryptBytes(key, encoder.encode(JSON.stringify(plaintext)));
 
   return {
-    iv: bytesToBase64(iv),
-    ciphertext: bytesToBase64(new Uint8Array(encrypted))
+    iv: encrypted.iv,
+    ciphertext: bytesToBase64(encrypted.ciphertext)
   };
 }
 
 export async function encryptBytes(
-  key: CryptoKey,
+  key: AppCryptoKey,
   plaintext: Uint8Array
 ): Promise<{ iv: string; ciphertext: Uint8Array }> {
+  const iv = randomBytes(12);
+
+  if (key.kind === "js") {
+    return {
+      iv: bytesToBase64(iv),
+      ciphertext: gcm(key.keyBytes, iv).encrypt(plaintext)
+    };
+  }
+
   const subtle = getSubtleCrypto();
-  const iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = await subtle.encrypt(
     { name: "AES-GCM", iv: toArrayBuffer(iv) },
-    key,
+    key.key,
     toArrayBuffer(plaintext)
   );
 
@@ -80,44 +160,39 @@ export async function encryptBytes(
 }
 
 export async function decryptBytes(
-  key: CryptoKey,
+  key: AppCryptoKey,
   ivBase64: string,
   ciphertext: Uint8Array
 ): Promise<Uint8Array> {
-  const subtle = getSubtleCrypto();
   const iv = base64ToBytes(ivBase64);
+
+  if (key.kind === "js") {
+    return gcm(key.keyBytes, iv).decrypt(ciphertext);
+  }
+
+  const subtle = getSubtleCrypto();
   const decrypted = await subtle.decrypt(
     { name: "AES-GCM", iv: toArrayBuffer(iv) },
-    key,
+    key.key,
     toArrayBuffer(ciphertext)
   );
 
   return new Uint8Array(decrypted);
 }
 
-export async function importAesGcmKey(rawKey: Uint8Array): Promise<CryptoKey> {
-  return getSubtleCrypto().importKey(
-    "raw",
-    toArrayBuffer(rawKey),
-    "AES-GCM",
-    false,
-    ["encrypt", "decrypt"]
-  );
+export function importAesGcmKey(rawKey: Uint8Array): AppCryptoKey {
+  return {
+    kind: "js",
+    keyBytes: new Uint8Array(rawKey)
+  };
 }
 
 export async function decryptMessage<T>(
-  key: CryptoKey,
+  key: AppCryptoKey,
   ivBase64: string,
   ciphertextBase64: string
 ): Promise<T> {
-  const subtle = getSubtleCrypto();
-  const iv = base64ToBytes(ivBase64);
-  const ciphertext = base64ToBytes(ciphertextBase64);
-  const decrypted = await subtle.decrypt(
-    { name: "AES-GCM", iv: toArrayBuffer(iv) },
-    key,
-    toArrayBuffer(ciphertext)
-  );
+  const decrypted = await decryptBytes(key, ivBase64, base64ToBytes(ciphertextBase64));
 
   return JSON.parse(decoder.decode(decrypted)) as T;
 }
@@ -147,9 +222,13 @@ export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 function getSubtleCrypto(): SubtleCrypto {
-  if (!globalThis.crypto?.subtle || !globalThis.isSecureContext) {
+  if (!isWebCryptoAvailable()) {
     throw new WebCryptoUnavailableError();
   }
 
   return globalThis.crypto.subtle;
+}
+
+function hasRandomValues(): boolean {
+  return typeof globalThis.crypto?.getRandomValues === "function";
 }

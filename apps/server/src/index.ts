@@ -16,7 +16,11 @@ import {
 
 const PORT = Number(process.env.PORT ?? 3001);
 const MAX_MESSAGE_BYTES = 8 * 1024;
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+const AUTH_SALT = "single-channel-e2ee-irc-v1/auth";
+const PBKDF2_ITERATIONS = 250_000;
+const CHANNEL_AUTH_TOKEN =
+  process.env.CHANNEL_AUTH_TOKEN ?? deriveAuthToken(process.env.CHANNEL_SHARED_SECRET);
+const ADMIN_NICKNAME = process.env.ADMIN_NICKNAME;
 const TLS_CERT_PATH = process.env.TLS_CERT_PATH;
 const TLS_KEY_PATH = process.env.TLS_KEY_PATH;
 const CURRENT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -25,6 +29,7 @@ const WEB_DIST_DIR =
 
 interface ClientState {
   connectionId: string;
+  nickname: string;
   limiter: ConnectionRateLimiter;
 }
 
@@ -40,9 +45,12 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, onlineCount: clients.size });
 });
 
-app.post("/files", async (req, res) => {
+app.post("/files", requireChannelAuth, async (req, res) => {
   try {
-    const manifest = await fileStore.createManifest(req.body);
+    const manifest = await fileStore.createManifest({
+      ...req.body,
+      uploader: req.header("x-nickname") ?? ""
+    });
     res.status(201).json({
       fileId: manifest.fileId,
       expiresAt: manifest.expiresAt,
@@ -59,6 +67,7 @@ app.put(
     type: "application/octet-stream",
     limit: MAX_CHUNK_BYTES
   }),
+  requireChannelAuth,
   async (req, res) => {
     try {
       const index = Number(req.params.index);
@@ -76,7 +85,7 @@ app.put(
   }
 );
 
-app.get("/files/:fileId/manifest", async (req, res) => {
+app.get("/files/:fileId/manifest", requireChannelAuth, async (req, res) => {
   try {
     res.json(await fileStore.getPublicManifest(req.params.fileId));
   } catch (error) {
@@ -84,7 +93,7 @@ app.get("/files/:fileId/manifest", async (req, res) => {
   }
 });
 
-app.get("/files/:fileId/chunks/:index", async (req, res) => {
+app.get("/files/:fileId/chunks/:index", requireChannelAuth, async (req, res) => {
   try {
     const chunk = await fileStore.getChunk(req.params.fileId, Number(req.params.index));
     res.type("application/octet-stream").send(chunk);
@@ -128,14 +137,26 @@ if (fs.existsSync(WEB_DIST_DIR)) {
 }
 
 wss.on("connection", (socket, req) => {
+  const auth = getWebSocketAuth(req);
+  if (!isAuthorizedChannelMember(auth.nickname, auth.proof)) {
+    socket.send(serializeServerMessage({
+      type: "server.error",
+      error: CHANNEL_AUTH_TOKEN ? "invalid_channel_key" : "channel_auth_not_configured"
+    }));
+    socket.close(1008, "invalid_channel_key");
+    return;
+  }
+
   const connectionId = crypto.randomUUID();
   clients.set(socket, {
     connectionId,
+    nickname: auth.nickname,
     limiter: new ConnectionRateLimiter()
   });
 
   console.info("client connected", {
     connectionId,
+    nickname: auth.nickname,
     onlineCount: clients.size,
     remoteAddress: req.socket.remoteAddress
   });
@@ -186,6 +207,7 @@ wss.on("connection", (socket, req) => {
     clients.delete(socket);
     console.info("client disconnected", {
       connectionId,
+      nickname: auth.nickname,
       onlineCount: clients.size
     });
     broadcastPresence();
@@ -245,6 +267,37 @@ function createHttpServer(appInstance: express.Express): http.Server | https.Ser
   return http.createServer(appInstance);
 }
 
+function deriveAuthToken(secret: string | undefined): string | undefined {
+  if (!secret) {
+    return undefined;
+  }
+
+  return crypto
+    .pbkdf2Sync(secret, AUTH_SALT, PBKDF2_ITERATIONS, 32, "sha256")
+    .toString("base64");
+}
+
+function requireChannelAuth(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+): void {
+  const nickname = req.header("x-nickname") ?? "";
+  const proof = req.header("x-channel-auth") ?? "";
+
+  if (!CHANNEL_AUTH_TOKEN) {
+    res.status(503).json({ error: "channel_auth_not_configured" });
+    return;
+  }
+
+  if (!isAuthorizedChannelMember(nickname, proof)) {
+    res.status(401).json({ error: "invalid_channel_key" });
+    return;
+  }
+
+  next();
+}
+
 function isHttpsServer(): boolean {
   return Boolean(TLS_CERT_PATH && TLS_KEY_PATH);
 }
@@ -276,10 +329,20 @@ function requireAdmin(
   res: express.Response,
   next: express.NextFunction
 ): void {
-  const header = req.header("authorization") ?? "";
-  const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+  const nickname = req.header("x-nickname") ?? "";
+  const proof = req.header("x-channel-auth") ?? "";
 
-  if (!ADMIN_TOKEN || token !== ADMIN_TOKEN) {
+  if (!CHANNEL_AUTH_TOKEN) {
+    res.status(503).json({ error: "channel_auth_not_configured" });
+    return;
+  }
+
+  if (!isAuthorizedChannelMember(nickname, proof)) {
+    res.status(401).json({ error: "invalid_channel_key" });
+    return;
+  }
+
+  if (!ADMIN_NICKNAME || nickname !== ADMIN_NICKNAME) {
     res.status(401).json({ error: "unauthorized" });
     return;
   }
@@ -303,4 +366,33 @@ function errorStatus(message: string): number {
   }
 
   return 500;
+}
+
+function getWebSocketAuth(req: http.IncomingMessage): {
+  nickname: string;
+  proof: string;
+} {
+  const url = new URL(req.url ?? "/ws", "http://localhost");
+  return {
+    nickname: url.searchParams.get("nickname") ?? "",
+    proof: url.searchParams.get("auth") ?? ""
+  };
+}
+
+function isAuthorizedChannelMember(nickname: string, proof: string): boolean {
+  if (!CHANNEL_AUTH_TOKEN) {
+    return false;
+  }
+
+  if (!isValidNickname(nickname) || !proof) {
+    return false;
+  }
+
+  const expected = Buffer.from(CHANNEL_AUTH_TOKEN, "utf8");
+  const actual = Buffer.from(proof, "utf8");
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
+
+function isValidNickname(nickname: string): boolean {
+  return nickname.length >= 1 && nickname.length <= 40;
 }

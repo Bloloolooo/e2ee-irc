@@ -8,6 +8,7 @@ import {
   importAesGcmKey,
   toArrayBuffer
 } from "./crypto";
+import type { AppCryptoKey } from "./crypto";
 import type {
   FileCredentialPlaintext,
   FileMetadataPlaintext
@@ -24,14 +25,17 @@ export interface UploadEncryptedFileResult {
 
 export interface UploadEncryptedFileOptions {
   file: File;
-  channelKey: CryptoKey;
+  channelKey: AppCryptoKey;
+  authProof: string;
   sender: string;
   onProgress(progress: number): void;
 }
 
 export interface DownloadEncryptedFileOptions {
   fileId: string;
-  channelKey: CryptoKey;
+  channelKey: AppCryptoKey;
+  authProof: string;
+  nickname: string;
   wrappedFileKeyIv: string;
   wrappedFileKey: string;
   filename: string;
@@ -63,6 +67,7 @@ interface PublicFileManifest {
 export async function uploadEncryptedFile({
   file,
   channelKey,
+  authProof,
   sender,
   onProgress
 }: UploadEncryptedFileOptions): Promise<UploadEncryptedFileResult> {
@@ -113,14 +118,15 @@ export async function uploadEncryptedFile({
     totalCiphertextBytes,
     metadataIv: encryptedMetadata.iv,
     encryptedMetadata: encryptedMetadata.ciphertext
-  });
+  }, authHeaders(sender, authProof));
 
   for (const [index, chunk] of encryptedChunks.entries()) {
     const response = await fetch(`/files/${fileId}/chunks/${index}`, {
       method: "PUT",
       headers: {
         "content-type": "application/octet-stream",
-        "x-chunk-iv": chunk.iv
+        "x-chunk-iv": chunk.iv,
+        ...authHeaders(sender, authProof)
       },
       body: toArrayBuffer(chunk.ciphertext)
     });
@@ -155,7 +161,7 @@ export async function uploadEncryptedFile({
 }
 
 export async function decryptFileCredentialForDisplay(
-  channelKey: CryptoKey,
+  channelKey: AppCryptoKey,
   credential: FileCredentialPlaintext
 ): Promise<FileMetadataPlaintext> {
   const fileKey = await unwrapFileKey(
@@ -173,6 +179,8 @@ export async function decryptFileCredentialForDisplay(
 export async function downloadEncryptedFile({
   fileId,
   channelKey,
+  authProof,
+  nickname,
   wrappedFileKeyIv,
   wrappedFileKey,
   filename,
@@ -180,11 +188,16 @@ export async function downloadEncryptedFile({
   onProgress
 }: DownloadEncryptedFileOptions): Promise<void> {
   const fileKey = await unwrapFileKey(channelKey, wrappedFileKeyIv, wrappedFileKey);
-  const manifest = await getJson<PublicFileManifest>(`/files/${fileId}/manifest`);
+  const manifest = await getJson<PublicFileManifest>(
+    `/files/${fileId}/manifest`,
+    authHeaders(nickname, authProof)
+  );
   const plaintextChunks: Uint8Array[] = [];
 
   for (const chunk of manifest.chunks) {
-    const response = await fetch(`/files/${fileId}/chunks/${chunk.index}`);
+    const response = await fetch(`/files/${fileId}/chunks/${chunk.index}`, {
+      headers: authHeaders(nickname, authProof)
+    });
     if (!response.ok) {
       throw new Error("chunk_download_failed");
     }
@@ -210,10 +223,10 @@ export async function downloadEncryptedFile({
 }
 
 async function unwrapFileKey(
-  channelKey: CryptoKey,
+  channelKey: AppCryptoKey,
   wrappedFileKeyIv: string,
   wrappedFileKey: string
-): Promise<CryptoKey> {
+): Promise<AppCryptoKey> {
   const rawKey = await decryptBytes(
     channelKey,
     wrappedFileKeyIv,
@@ -224,11 +237,16 @@ async function unwrapFileKey(
   return fileKey;
 }
 
-async function postJson<T>(url: string, body: unknown): Promise<T> {
+async function postJson<T>(
+  url: string,
+  body: unknown,
+  headers: Record<string, string>
+): Promise<T> {
   const response = await fetch(url, {
     method: "POST",
     headers: {
-      "content-type": "application/json"
+      "content-type": "application/json",
+      ...headers
     },
     body: JSON.stringify(body)
   });
@@ -240,11 +258,21 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function getJson<T>(url: string): Promise<T> {
-  const response = await fetch(url);
+async function getJson<T>(
+  url: string,
+  headers: Record<string, string>
+): Promise<T> {
+  const response = await fetch(url, { headers });
   if (!response.ok) {
     throw new Error("request_failed");
   }
 
   return response.json() as Promise<T>;
+}
+
+function authHeaders(nickname: string, authProof: string): Record<string, string> {
+  return {
+    "x-nickname": nickname,
+    "x-channel-auth": authProof
+  };
 }
