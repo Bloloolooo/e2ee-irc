@@ -26,6 +26,7 @@ const TLS_KEY_PATH = process.env.TLS_KEY_PATH;
 const CURRENT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIST_DIR =
   process.env.WEB_DIST_DIR ?? path.resolve(CURRENT_DIR, "..", "..", "web", "dist");
+const FILE_STORE_DIR = process.env.FILE_STORE_DIR ?? "/tmp/files";
 
 interface ClientState {
   connectionId: string;
@@ -37,7 +38,7 @@ const app = express();
 const server = createHttpServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 const clients = new Map<WebSocket, ClientState>();
-const fileStore = new FileStore(path.resolve(process.cwd(), "data", "files"));
+const fileStore = new FileStore(FILE_STORE_DIR);
 
 app.use(express.json({ limit: "64kb" }));
 
@@ -105,15 +106,6 @@ app.get("/files/:fileId/chunks/:index", requireChannelAuth, async (req, res) => 
 app.get("/admin/files", requireAdmin, async (_req, res) => {
   try {
     res.json({ files: await fileStore.listAdminFiles() });
-  } catch (error) {
-    sendHttpError(res, error);
-  }
-});
-
-app.delete("/admin/files/:fileId", requireAdmin, async (req, res) => {
-  try {
-    await fileStore.deleteFile(req.params.fileId);
-    res.status(204).send();
   } catch (error) {
     sendHttpError(res, error);
   }
@@ -224,6 +216,7 @@ wss.on("connection", (socket, req) => {
 server.listen(PORT, () => {
   const protocol = isHttpsServer() ? "https" : "http";
   console.info(`e2ee-irc server listening on ${protocol}://localhost:${PORT}`);
+  console.info(`encrypted files stored in ${FILE_STORE_DIR}`);
 });
 
 void fileStore.ensureReady();

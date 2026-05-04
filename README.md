@@ -58,7 +58,7 @@ Development URLs:
 
 For LAN or public IP development through Vite, open `http://<server-ip>:5173`. The client connects its WebSocket to `ws://<server-ip>:3001/ws` by default in development.
 
-Encrypted uploaded files are stored under `apps/server/data/files` when running the server workspace, or under `data/files` when running the built server from the repository root. The `data` directory is ignored by git.
+Encrypted uploaded files are stored under `/tmp/files` by default. You can override this with `FILE_STORE_DIR=/some/path`. The stored files are ciphertext chunks and encrypted metadata, not plaintext files.
 
 Channel and admin configuration:
 
@@ -72,7 +72,12 @@ Admin endpoints:
 
 ```bash
 curl -H "x-nickname: alice" -H "x-channel-auth: <derived-proof>" http://localhost:3001/admin/files
-curl -X DELETE -H "x-nickname: alice" -H "x-channel-auth: <derived-proof>" http://localhost:3001/admin/files/<fileId>
+```
+
+There is no HTTP delete endpoint. Delete encrypted files directly on the server, for example:
+
+```bash
+rm -rf /tmp/files/<fileId>
 ```
 
 ## Build
@@ -149,7 +154,7 @@ VITE_WS_URL=wss://example.com/ws
 7. Try a different shared secret and confirm the client cannot enter the channel.
 8. Confirm online count changes when windows join or leave.
 9. Upload a file under 20 MB and confirm the other window can download and decrypt it.
-10. Use the configured admin nickname to list and delete encrypted file objects.
+10. Use the configured admin nickname to list encrypted file objects, then delete local ciphertext directories under `/tmp/files` if needed.
 
 ## Non-Goals
 
