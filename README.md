@@ -4,6 +4,10 @@ An experimental single-channel browser-based end-to-end encrypted IRC-like chat.
 
 The server is a WebSocket relay plus a small encrypted file object store. It accepts connections, validates ciphertext envelopes, applies basic rate limits, tracks online count, broadcasts ciphertext to connected browsers, and stores encrypted file chunks. Message plaintext and file plaintext are encrypted and decrypted only in the browser.
 
+## License
+
+This project is licensed under the PolyForm Noncommercial License 1.0.0. Commercial use is not permitted without a separate license from the project owner. See [LICENSE](./LICENSE).
+
 ## Security Notes
 
 - The server does not receive the browser-entered shared secret.
