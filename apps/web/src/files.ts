@@ -6,6 +6,8 @@ import {
   encryptBytes,
   encryptMessage,
   importAesGcmKey,
+  randomBytes,
+  randomId,
   toArrayBuffer
 } from "./crypto";
 import type { AppCryptoKey } from "./crypto";
@@ -79,10 +81,10 @@ export async function uploadEncryptedFile({
     throw new Error("file_too_large");
   }
 
-  const fileId = crypto.randomUUID();
+  const fileId = randomId();
   const sentAt = Date.now();
   const expiresAt = sentAt + RETENTION_MS;
-  const rawFileKey = crypto.getRandomValues(new Uint8Array(32));
+  const rawFileKey = randomBytes(32);
   const fileKey = await importAesGcmKey(rawFileKey);
   const wrapped = await encryptBytes(channelKey, rawFileKey);
 
@@ -144,7 +146,7 @@ export async function uploadEncryptedFile({
     metadata,
     credential: {
       type: "file.credential.plaintext",
-      id: crypto.randomUUID(),
+      id: randomId(),
       sender,
       sentAt,
       fileId,

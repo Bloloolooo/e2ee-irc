@@ -1,13 +1,27 @@
-import { gcm } from "@noble/ciphers/aes.js";
-import { pbkdf2 } from "@noble/hashes/pbkdf2.js";
-import { sha256 } from "@noble/hashes/sha2.js";
-
 const KEY_SALT = "single-channel-e2ee-irc-v1";
 const AUTH_SALT = "single-channel-e2ee-irc-v1/auth";
 const PBKDF2_ITERATIONS = 250_000;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+let nobleCryptoPromise: Promise<NobleCrypto> | null = null;
+
+interface NobleCrypto {
+  gcm: (
+    key: Uint8Array,
+    nonce: Uint8Array
+  ) => {
+    encrypt(plaintext: Uint8Array): Uint8Array;
+    decrypt(ciphertext: Uint8Array): Uint8Array;
+  };
+  pbkdf2: (
+    hash: never,
+    password: Uint8Array,
+    salt: Uint8Array,
+    options: { c: number; dkLen: number }
+  ) => Uint8Array;
+  sha256: never;
+}
 
 export type AppCryptoKey =
   | {
@@ -94,18 +108,19 @@ export async function deriveKeyFromSecret(secret: string): Promise<DerivedChanne
   };
 }
 
-function deriveKeyWithJsCrypto(secret: string): DerivedChannelKeys {
+async function deriveKeyWithJsCrypto(secret: string): Promise<DerivedChannelKeys> {
+  const noble = await loadNobleCrypto();
   const secretBytes = encoder.encode(secret);
   return {
     key: {
       kind: "js",
-      keyBytes: pbkdf2(sha256, secretBytes, encoder.encode(KEY_SALT), {
+      keyBytes: noble.pbkdf2(noble.sha256, secretBytes, encoder.encode(KEY_SALT), {
         c: PBKDF2_ITERATIONS,
         dkLen: 32
       })
     },
     authProof: bytesToBase64(
-      pbkdf2(sha256, secretBytes, encoder.encode(AUTH_SALT), {
+      noble.pbkdf2(noble.sha256, secretBytes, encoder.encode(AUTH_SALT), {
         c: PBKDF2_ITERATIONS,
         dkLen: 32
       })
@@ -119,6 +134,25 @@ export function randomBytes(length: number): Uint8Array {
   }
 
   return globalThis.crypto.getRandomValues(new Uint8Array(length));
+}
+
+export function randomId(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+
+  const bytes = randomBytes(16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
+
+  return [
+    hex.slice(0, 4).join(""),
+    hex.slice(4, 6).join(""),
+    hex.slice(6, 8).join(""),
+    hex.slice(8, 10).join(""),
+    hex.slice(10, 16).join("")
+  ].join("-");
 }
 
 export async function encryptMessage(
@@ -140,9 +174,10 @@ export async function encryptBytes(
   const iv = randomBytes(12);
 
   if (key.kind === "js") {
+    const noble = await loadNobleCrypto();
     return {
       iv: bytesToBase64(iv),
-      ciphertext: gcm(key.keyBytes, iv).encrypt(plaintext)
+      ciphertext: noble.gcm(key.keyBytes, iv).encrypt(plaintext)
     };
   }
 
@@ -167,7 +202,8 @@ export async function decryptBytes(
   const iv = base64ToBytes(ivBase64);
 
   if (key.kind === "js") {
-    return gcm(key.keyBytes, iv).decrypt(ciphertext);
+    const noble = await loadNobleCrypto();
+    return noble.gcm(key.keyBytes, iv).decrypt(ciphertext);
   }
 
   const subtle = getSubtleCrypto();
@@ -231,4 +267,20 @@ function getSubtleCrypto(): SubtleCrypto {
 
 function hasRandomValues(): boolean {
   return typeof globalThis.crypto?.getRandomValues === "function";
+}
+
+function loadNobleCrypto(): Promise<NobleCrypto> {
+  if (!nobleCryptoPromise) {
+    nobleCryptoPromise = Promise.all([
+      import("@noble/ciphers/aes.js"),
+      import("@noble/hashes/pbkdf2.js"),
+      import("@noble/hashes/sha2.js")
+    ]).then(([aes, pbkdf2Module, sha2]) => ({
+      gcm: aes.gcm,
+      pbkdf2: pbkdf2Module.pbkdf2,
+      sha256: sha2.sha256
+    }) as unknown as NobleCrypto);
+  }
+
+  return nobleCryptoPromise;
 }

@@ -3,6 +3,7 @@ import {
   decryptMessage,
   deriveKeyFromSecret,
   encryptMessage,
+  randomId,
   WebCryptoUnavailableError
 } from "./crypto";
 import type { AppCryptoKey } from "./crypto";
@@ -153,7 +154,7 @@ export default function App() {
       return;
     }
 
-    const id = crypto.randomUUID();
+    const id = randomId();
     const sentAt = Date.now();
     const plaintext: ChatPlaintextMessage = {
       type: "chat.plaintext",
@@ -379,7 +380,7 @@ export default function App() {
       ...current,
       {
         kind: "system",
-        id: crypto.randomUUID(),
+        id: randomId(),
         text,
         level,
         sentAt: Date.now()

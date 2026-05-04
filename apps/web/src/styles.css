@@ -67,6 +67,36 @@ input:focus {
   padding: 24px;
 }
 
+.fatal-shell {
+  align-items: center;
+  display: flex;
+  min-height: 100vh;
+  justify-content: center;
+  padding: 24px;
+}
+
+.fatal-panel {
+  background: #ffffff;
+  border: 1px solid #f1b5ad;
+  border-radius: 8px;
+  max-width: 640px;
+  padding: 24px;
+  width: 100%;
+}
+
+.fatal-panel h1 {
+  margin: 0 0 12px;
+}
+
+.fatal-panel pre {
+  background: #fff2f0;
+  border-radius: 6px;
+  color: #8f1f13;
+  overflow-x: auto;
+  padding: 12px;
+  white-space: pre-wrap;
+}
+
 .join-panel {
   background: #ffffff;
   border: 1px solid #d9e1e8;
